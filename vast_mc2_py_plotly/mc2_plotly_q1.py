@@ -276,52 +276,92 @@ def _build_trajectories_hotspots(
     hotspot_threshold: float,
     title: str,
 ) -> go.Figure:
-    sensor_ids = list(range(1, 51))
+    sensor_ids = sorted(mobile_full["sensorId"].dropna().astype(int).unique().tolist())
     traj = thin_trajectory(mobile_full)
     hot = mobile_thin_for_hotspots[mobile_thin_for_hotspots["cpm"] >= hotspot_threshold].copy()
 
     fig = go.Figure()
 
-    # trajectories (one per sensor)
+    def sensor_label(sid: int) -> str:
+        # Если есть userId, можно показывать в легенде "12 — CitizenScientist 12"
+        if "userId" in mobile_full.columns:
+            vals = (
+                mobile_full.loc[mobile_full["sensorId"] == sid, "userId"]
+                .dropna()
+                .astype(str)
+                .unique()
+                .tolist()
+            )
+            if vals:
+                return f"{sid} — {vals[0]}"
+        return f"{sid}"
+
     for sid in sensor_ids:
-        g = traj[traj["sensorId"] == sid]
-        fig.add_trace(
-            go.Scattergl(
-                x=g["long"],
-                y=g["lat"],
-                mode="lines",
-                line=dict(width=1, color=MOBILE_COLOURS_RGB.get(sid, "rgb(120,120,120)")),
-                opacity=0.25,
-                name=f"traj {sid}",
-                hoverinfo="skip",
-                showlegend=False,
-            )
-        )
+        color = MOBILE_COLOURS_RGB.get(sid, "rgb(120,120,120)")
+        label = sensor_label(sid)
+        legend_group = f"sensor_{sid}"
 
-    # hotspots
-    if len(hot) > 0:
-        cpm = hot["cpm"].astype(float).to_numpy()
-        c = cpm.clip(1000, 50000)
-        t = (c - 1000.0) / (50000.0 - 1000.0)
-        sizes = 6 + (t ** 0.6) * 40
-
-        fig.add_trace(
-            go.Scattergl(
-                x=hot["long"],
-                y=hot["lat"],
-                mode="markers",
-                name=f"hotspots cpm≥{hotspot_threshold:g}",
-                marker=dict(
-                    size=sizes,
-                    color=[MOBILE_COLOURS_RGB.get(int(s), "rgb(120,120,120)") for s in hot["sensorId"].astype(int)],
-                    opacity=0.18,
-                ),
-                hovertemplate="sensor=%{text}<br>cpm=%{customdata}<br>lon=%{x}<br>lat=%{y}<extra></extra>",
-                text=hot["sensorId"].astype(int),
-                customdata=hot["cpm"],
-                showlegend=False,
+        # ---- trajectory ----
+        g_traj = traj[traj["sensorId"] == sid].sort_values("timestamp")
+        if len(g_traj) > 0:
+            fig.add_trace(
+                go.Scattergl(
+                    x=g_traj["long"],
+                    y=g_traj["lat"],
+                    mode="lines",
+                    line=dict(width=1, color=color),
+                    opacity=0.25,
+                    name=label,
+                    legendgroup=legend_group,
+                    showlegend=True,   # один элемент легенды на датчик
+                    hovertemplate=(
+                        f"sensor={sid}"
+                        "<br>lon=%{x}"
+                        "<br>lat=%{y}"
+                        "<extra></extra>"
+                    ),
+                )
             )
-        )
+
+        # ---- hotspots of the same sensor ----
+        g_hot = hot[hot["sensorId"] == sid].sort_values("timestamp")
+        if len(g_hot) > 0:
+            cpm = g_hot["cpm"].astype(float).to_numpy()
+            c = cpm.clip(1000.0, 50000.0)
+
+            # как в Vega/LitVis: степенная шкала exponent=0.6
+            t = (c - 1000.0) / (50000.0 - 1000.0)
+
+            # В Vega size = площадь круга, не диаметр
+            areas = 400.0 + (t ** 0.6) * (40000.0 - 400.0)
+
+            # Plotly marker.size = диаметр в пикселях
+            sizes = 2.0 * np.sqrt(areas / np.pi)
+
+            fig.add_trace(
+                go.Scattergl(
+                    x=g_hot["long"],
+                    y=g_hot["lat"],
+                    mode="markers",
+                    marker=dict(
+                        size=sizes,
+                        color=color,
+                        opacity=0.10,
+                    ),
+                    name=label,
+                    legendgroup=legend_group,
+                    showlegend=False,  # чтобы не было дубликата в легенде
+                    text=g_hot["sensorId"].astype(int),
+                    customdata=g_hot["cpm"],
+                    hovertemplate=(
+                        "sensor=%{text}"
+                        "<br>cpm=%{customdata}"
+                        "<br>lon=%{x}"
+                        "<br>lat=%{y}"
+                        "<extra></extra>"
+                    ),
+                )
+            )
 
     # static sensors
     fig.add_trace(
@@ -330,15 +370,20 @@ def _build_trajectories_hotspots(
             y=static_locations["lat"],
             mode="markers+text",
             name="static sensors",
-            marker=dict(size=10, color="rgba(255,0,0,0.0)", line=dict(width=2, color="red")),
+            marker=dict(
+                size=10,
+                color="rgba(255,0,0,0.0)",
+                line=dict(width=2, color="red"),
+            ),
             text=static_locations["id"].astype(str),
             textposition="middle right",
             hovertemplate="static %{text}<extra></extra>",
-            showlegend=False,
+            showlegend=True,
         )
     )
 
-    # POIs (text only)
+
+    # POIs
     pois = list(iter_pois())
     fig.add_trace(
         go.Scatter(
@@ -348,7 +393,8 @@ def _build_trajectories_hotspots(
             text=[p.label for p in pois],
             textfont=dict(size=18),
             hoverinfo="skip",
-            showlegend=False,
+            name="POI",
+            showlegend=True,
         )
     )
 
@@ -357,8 +403,17 @@ def _build_trajectories_hotspots(
         template="plotly_white",
         xaxis=dict(title="Longitude"),
         yaxis=dict(title="Latitude", scaleanchor="x", scaleratio=1),
-        margin=dict(l=60, r=30, t=60, b=60),
+        margin=dict(l=60, r=220, t=60, b=60),
         height=850,
+        legend=dict(
+            title="Mobile sensors",
+            orientation="v",
+            x=1.02,
+            y=1.0,
+            xanchor="left",
+            yanchor="top",
+            groupclick="togglegroup",  # клик по легенде скрывает и линию, и hotspot'ы датчика
+        ),
     )
     return fig
 
